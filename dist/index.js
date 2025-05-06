@@ -1,99 +1,50 @@
-import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
-import { createBurnCheckedInstruction} from '@solana/spl-token';
-import express from 'express';
-import path from 'path';
-import { v4 as uuidv4 } from 'uuid';
-import mysql from 'mysql2/promise'
-
-interface TransferData {
-  senderATA:   string;
-  receiverWallet: string;
-  amount:      string;
-  mintAddress: string;
-  decimals:    string;
-}
-interface BurnData {
-  senderATA:   string;
-  amount:      string;
-  mintAddress: string;
-  decimals:    string;
-  item_amount: string;
-}
+"use strict";
+var __importDefault = (this && this.__importDefault) || function (mod) {
+    return (mod && mod.__esModule) ? mod : { "default": mod };
+};
+Object.defineProperty(exports, "__esModule", { value: true });
+const express_1 = __importDefault(require("express"));
+const path_1 = __importDefault(require("path"));
+const uuid_1 = require("uuid");
 // In-memory ticket store
-const pending = new Map<string,TransferData>();
-const pendingBurn = new Map<string,BurnData>();
-
-const app = express();
-
-const db = mysql.createPool({
-  host:     "localhost",
-  user:     "root",
-  password: "Qwerty@061205",
-  database: "minecraft",
-});
-async function loadSessionKeypair(sessionPubkey: string): Promise<Keypair | null> {
-  const [rows] = await db.execute<mysql.RowDataPacket[]>(
-    `SELECT SECRET_B64
-       FROM session_secret
-      WHERE SESSION_PUBLICKEY = ?`,
-    [ sessionPubkey ]
-  );
-
-  if (!rows.length) return null;
-  const secretB64 = rows[0].SECRET_B64 as string;
-  const secretKey = Uint8Array.from(Buffer.from(secretB64, 'base64'));
-  return Keypair.fromSecretKey(secretKey);
-}
-const conn = new Connection("https://api.devnet.solana.com");
-const SESSION_STORE = new Map<string, Uint8Array>();
-const MINT = new PublicKey("8ukoz8y6bJxpjUVSE3bEDbGjwyStqXBQZiSyxjhjNx1g");
-const DECIMALS = 9; // 9 decimals for the token
-const ALLOWANCE = BigInt(Math.round(1000000000 * Math.pow(10, DECIMALS))); // 1 billion tokens (10^9)
-app.use(express.json());
-app.use(express.static(path.join(__dirname, 'public')));
-
+const pending = new Map();
+const pendingBurn = new Map();
+const app = (0, express_1.default)();
+app.use(express_1.default.json());
+app.use(express_1.default.static(path_1.default.join(__dirname, 'public')));
 //Plugin POSTs here to get a one-time ticket
 app.post('/confirm', (req, res) => {
-  // cast the incoming JSON to our TransferData shape
-  const { senderATA, receiverWallet, amount, mintAddress, decimals } =
-    req.body as TransferData;
-
-  if (!senderATA || !receiverWallet || !amount || !mintAddress || !decimals) {
-    res.status(400).json({ success: false, error: 'Missing fields' });
+    // cast the incoming JSON to our TransferData shape
+    const { senderATA, receiverATA, amount, mintAddress, decimals } = req.body;
+    if (!senderATA || !receiverATA || !amount || !mintAddress || !decimals) {
+        res.status(400).json({ success: false, error: 'Missing fields' });
+        return;
+    }
+    const ticket = (0, uuid_1.v4)();
+    pending.set(ticket, { senderATA, receiverATA, amount, mintAddress, decimals });
+    console.log(`🔖 Created ticket ${ticket}`, req.body);
+    res.json({ success: true, ticket });
     return;
-  }
-
-  const ticket = uuidv4();
-  pending.set(ticket, { senderATA, receiverWallet, amount, mintAddress, decimals });
-  console.log(`🔖 Created ticket ${ticket}`, req.body);
-  res.json({ success: true, ticket });
-  return ;
 });
-
 // Plugin POSTs here to get a one-time ticket
 app.post('/buy', (req, res) => {
-  // cast the incoming JSON to our BurnData shape
-  const { senderATA, amount, mintAddress, decimals, item_amount } =
-    req.body as BurnData;
-
-  if (!senderATA || !amount || !mintAddress || !decimals) {
-    res.status(400).json({ success: false, error: 'Missing fields' });
+    // cast the incoming JSON to our BurnData shape
+    const { senderATA, amount, mintAddress, decimals, item_amount } = req.body;
+    if (!senderATA || !amount || !mintAddress || !decimals) {
+        res.status(400).json({ success: false, error: 'Missing fields' });
+        return;
+    }
+    const ticket = (0, uuid_1.v4)();
+    pendingBurn.set(ticket, { senderATA, amount, mintAddress, decimals, item_amount });
+    console.log(`🔖 Created ticket ${ticket}`, req.body);
+    res.json({ success: true, ticket });
     return;
-  }
-
-  const ticket = uuidv4();
-  pendingBurn.set(ticket, { senderATA, amount, mintAddress, decimals, item_amount });
-  console.log(`🔖 Created ticket ${ticket}`, req.body);
-  res.json({ success: true, ticket });
-  return ;
 });
-
-
 //Player clicks this URL → we lookup the ticket and render the Transfer page
 app.get('/confirm', (req, res) => {
-  const ticket = String(req.query.ticket);
-  if (!ticket || !pending.has(ticket)) {
-    res.status(404).send(`
+    const ticket = String(req.query.ticket);
+    if (!ticket || !pending.has(ticket)) {
+        res.status(404).send(`
     <!DOCTYPE html>
     <html lang="en">
     <head>
@@ -154,15 +105,12 @@ app.get('/confirm', (req, res) => {
     </body>
     </html>
   `);
-    return;
-  }
-
-  const { senderATA, receiverWallet, amount, mintAddress, decimals } =
-    pending.get(ticket)!;
-  pending.delete(ticket);
-
-  // Render the confirmation page
-  res.send(`
+        return;
+    }
+    const { senderATA, receiverATA, amount, mintAddress, decimals } = pending.get(ticket);
+    pending.delete(ticket);
+    // Render the confirmation page
+    res.send(`
     <!DOCTYPE html>
     <html>
       <head>
@@ -274,7 +222,7 @@ app.get('/confirm', (req, res) => {
           <h1>Confirm Your Transfer</h1>
           <ul class="details">
             <li><strong>From ATA:</strong>   ${senderATA}</li>
-            <li><strong>To ATA:</strong>     ${receiverWallet}</li>
+            <li><strong>To ATA:</strong>     ${receiverATA}</li>
             <li><strong>Amount:</strong>     ${amount}</li>
             <li><strong>Mint:</strong>       ${mintAddress}</li>
             <li><strong>Decimals:</strong>   ${decimals}</li>
@@ -292,7 +240,7 @@ app.get('/confirm', (req, res) => {
               try {
                 const sig = await sendToken(
                   '${senderATA}',
-                  '${receiverWallet}',
+                  '${receiverATA}',
                   Number('${amount}'),
                   '${mintAddress}',
                   Number('${decimals}')
@@ -315,13 +263,11 @@ app.get('/confirm', (req, res) => {
     </html>
   `);
 });
-
 //Player clicks this URL → we lookup the ticket and render the Burn page
 app.get('/buy', (req, res) => {
-  const ticket = String(req.query.ticket);
-  if (!ticket || !pendingBurn.has(ticket)) {
-    res.status(404).send(
-      `
+    const ticket = String(req.query.ticket);
+    if (!ticket || !pendingBurn.has(ticket)) {
+        res.status(404).send(`
       <!DOCTYPE html>
       <html lang="en">
       <head>
@@ -381,17 +327,13 @@ app.get('/buy', (req, res) => {
         </div>
       </body>
       </html>
-  `
-    );
-    return;
-  }
-
-  const { senderATA, amount, mintAddress, decimals, item_amount } =
-    pendingBurn.get(ticket)!;
-  pendingBurn.delete(ticket);
-
-  // Render the confirmation page
-  res.send(`
+  `);
+        return;
+    }
+    const { senderATA, amount, mintAddress, decimals, item_amount } = pendingBurn.get(ticket);
+    pendingBurn.delete(ticket);
+    // Render the confirmation page
+    res.send(`
     <!DOCTYPE html>
     <html>
       <head>
@@ -541,130 +483,8 @@ app.get('/buy', (req, res) => {
     </html>
   `);
 });
-
-// Tạo session
-app.post('/session/new', async (req, res) => {
-  const { userPubkey, userATA } = req.body;
-  const user = new PublicKey(userPubkey);
-
-  // 1) Tạo session key
-  const session = Keypair.generate();
-  const sessionId = session.publicKey.toBase58();
-  const secretB64 = Buffer.from(session.secretKey).toString('base64');
-  await db.execute(
-    `INSERT INTO session_secret (SESSION_PUBLICKEY, SECRET_B64)
-     VALUES (?, ?)`,
-    [ sessionId, secretB64 ]
-  );
-  console.log('Session created:', session.publicKey.toBase58());
-  res.json({
-    sessionId: sessionId
-  });
-});
-
-
-app.post('/session/burn', async (req, res) => {
-  try {
-    const { sessionId, userATA, amount } = req.body;
-    // Khôi phục session Keypair
-    const session = await loadSessionKeypair(sessionId);
-    if (!session) {
-      res.status(404).json({ error: 'Session not found' });
-      return;
-    }
-
-    // 1) Tạo instruction BurnChecked với đúng thứ tự:
-    //    account, mint, owner, amount, decimals
-    const burnIx = createBurnCheckedInstruction(
-      new PublicKey(userATA),   // #1: token account của user
-      MINT,                     // #2: mint của token
-      session.publicKey,        // #3: authority (session key)
-      BigInt(Math.round(amount * Math.pow(10, DECIMALS))),           // #4: số lượng raw units
-      DECIMALS                  // #5: decimals của token
-    );
-
-    // 2) Build transaction
-    const tx = new Transaction()
-      .add(burnIx);
-      tx.feePayer = session.publicKey; // #1: fee payer là session key
-
-    // 3) Thiết lập recentBlockhash
-    const  blockhash  = await conn.getLatestBlockhash('finalized');
-    tx.recentBlockhash = blockhash.blockhash;
-
-    // 4) Ký và gửi
-    tx.sign(session);
-    const sig = await conn.sendRawTransaction(tx.serialize());
-
-    await conn.confirmTransaction({
-      signature: sig,
-      blockhash: blockhash.blockhash,
-      lastValidBlockHeight: blockhash.lastValidBlockHeight,
-    }, 'confirmed');
-    
-    res.status(200).json({ txid: sig });
-    return;
-  } catch (err: any) {
-    console.error('Burn error:', err);
-    res.status(500).json({ error: err.message });
-    return;
-  }
-});
-
-
-app.get('/approve', (req, res) => {
-  const { sessionId, userATA } = req.query as { sessionId?: string, userATA?: string };
-  if (!sessionId || !userATA) {
-    res.status(400).send("Missing sessionId or userATA");
-    return ;
-  }
-
-  // you could also embed mint/decimals/allowance here,
-  // or hard-code them if they never change:
-  const MINT        = "8ukoz8y6bJxpjUVSE3bEDbGjwyStqXBQZiSyxjhjNx1g";
-
-  res.send(`
-    <!DOCTYPE html>
-    <html lang="en">
-    <head><meta charset="utf-8"/><title>Approve Session</title></head>
-    <body style="display:flex;flex-direction:column;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;">
-      <h2>Approve One-Time Session</h2>
-      <button id="approveBtn" style="padding:.75rem 1.5rem;font-size:1rem;border:none;border-radius:4px;background:#6366f1;color:white;cursor:pointer;">
-        Sign with Wallet
-      </button>
-      <script type="module">
-        import { approveSession } from '/approve.js';
-
-        const btn = document.getElementById('approveBtn');
-        btn.onclick = async () => {
-          btn.disabled = true;
-          btn.textContent = 'Signing…';
-          try {
-            const sig = await approveSession(
-              "${sessionId}",
-              "${userATA}",
-              "${MINT}",
-              ${DECIMALS},
-              BigInt(${ALLOWANCE})
-            );
-            alert('✅ Approved! Signature: ' + sig);
-            btn.textContent = 'Done';
-          } catch (e) {
-            console.error(e);
-            alert('❌ ' + e.message);
-            btn.disabled = false;
-            btn.textContent = 'Sign with Wallet';
-          }
-        };
-      </script>
-    </body>
-    </html>
-  `);
-});
-
 // health-check
-app.get('/', (_req, res) => {res.send('✅ Server is running!')});
-
+app.get('/', (_req, res) => { res.send('✅ Server is running!'); });
 app.listen(3000, () => {
-  console.log('🚀 Listening on http://localhost:3000');
+    console.log('🚀 Listening on http://localhost:3000');
 });

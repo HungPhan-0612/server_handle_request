@@ -1,7 +1,7 @@
 import { Buffer } from 'buffer';
 ;(globalThis as any).Buffer = Buffer;
 import { Connection, PublicKey, Transaction, clusterApiUrl } from '@solana/web3.js';
-import { createTransferCheckedInstruction } from '@solana/spl-token';
+import { createTransferCheckedInstruction, getAssociatedTokenAddress, createAssociatedTokenAccountInstruction} from '@solana/spl-token';
 
 // Initialize connection to the cluster (devnet/testnet/mainnet)
 const connection = new Connection("https://api.devnet.solana.com");
@@ -20,7 +20,7 @@ function getProvider(): any {
 /**
  * Send an SPL token transfer transaction using Phantom for signing.
  * @param senderATA - Associated Token Account address of the sender
- * @param receiverATA - Associated Token Account address of the receiver
+ * @param receiverWallet - Associated Token Account address of the receiver
  * @param amount - Token amount in human-readable units (e.g., 1.5)
  * @param mintAddress - The SPL token mint address
  * @param decimals - Number of decimals the token uses
@@ -28,12 +28,12 @@ function getProvider(): any {
  */
 export async function sendToken(
   senderATA: string,
-  receiverATA: string,
+  receiverWallet: string,
   amount: number,
   mintAddress: string,
   decimals: number
 ): Promise<string> {
-  console.log('🔥 sendToken()', { senderATA, receiverATA, amount, mintAddress, decimals });
+  console.log('🔥 sendToken()', { senderATA, receiverWallet, amount, mintAddress, decimals });
   // Connect to Phantom
   try{const provider = getProvider();
     await provider.connect();
@@ -42,9 +42,22 @@ export async function sendToken(
     const walletPubkey = new PublicKey(provider.publicKey.toString());
     console.log('[sendToken] connected wallet', walletPubkey.toString());;
     const fromTokenAccount = new PublicKey(senderATA);
-    const toTokenAccount = new PublicKey(receiverATA);
+    const toPubKey = new PublicKey(receiverWallet);
     const mintPubkey = new PublicKey(mintAddress);
-  
+    const ata = await getAssociatedTokenAddress(mintPubkey, toPubKey);  
+    console.log('▶️ derived ATA:', ata.toBase58());
+    // Check if the receiver's ATA already exists
+    const ataInfo = await connection.getAccountInfo(ata, 'confirmed'); 
+    const ixns = [];  
+    if (ata === null){
+      ixns.push(
+        createAssociatedTokenAccountInstruction(  
+        walletPubkey,     // who pays the rent + fees  
+        ata,             // the ATA to (maybe) create  
+        toPubKey,     // who'll own this ATA  
+        mintPubkey       // which token mint  
+      ));
+    } 
     // Verify the sender ATA belongs to the connected wallet
     const parsedInfo = await connection.getParsedAccountInfo(fromTokenAccount);
     if (!parsedInfo.value) {
@@ -58,19 +71,20 @@ export async function sendToken(
   
     // Convert amount to smallest unit
     const rawAmount = BigInt(Math.round(amount * Math.pow(10, decimals)));
-  
-    // Create the transfer instruction (checked ensures correct decimals)
-    const transferIx = createTransferCheckedInstruction(
-      fromTokenAccount,
-      mintPubkey,
-      toTokenAccount,
-      walletPubkey,
-      rawAmount,
-      decimals
-    );
 
+    // Create the transfer instruction (checked ensures correct decimals)
+    ixns.push(
+      createTransferCheckedInstruction(
+        fromTokenAccount,
+        mintPubkey,
+        ata,
+        walletPubkey,
+        rawAmount,
+        decimals
+      )
+    );
     // Build transaction
-    const transaction = new Transaction().add(transferIx);
+    const transaction = new Transaction().add(...ixns);
     transaction.feePayer = walletPubkey;
     const {blockhash}= await connection.getLatestBlockhash('finalized');
     transaction.recentBlockhash = blockhash;

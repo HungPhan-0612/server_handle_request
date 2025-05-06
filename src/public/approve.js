@@ -7941,7 +7941,7 @@ var require_browser2 = __commonJS({
   }
 });
 
-// src/send_token.ts
+// src/approve.ts
 var import_buffer3 = __toESM(require_buffer());
 
 // node_modules/@solana/web3.js/lib/index.browser.esm.js
@@ -21183,19 +21183,6 @@ var TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5D
 var ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 var NATIVE_MINT = new PublicKey("So11111111111111111111111111111111111111112");
 
-// node_modules/@solana/spl-token/lib/esm/errors.mjs
-var TokenError = class extends Error {
-  constructor(message) {
-    super(message);
-  }
-};
-var TokenOwnerOffCurveError = class extends TokenError {
-  constructor() {
-    super(...arguments);
-    this.name = "TokenOwnerOffCurveError";
-  }
-};
-
 // node_modules/@solana/spl-token/lib/esm/instructions/initializeMint.mjs
 var initializeMintInstructionData = (0, import_buffer_layout5.struct)([
   (0, import_buffer_layout5.u8)("instruction"),
@@ -21286,20 +21273,6 @@ var transferCheckedInstructionData = (0, import_buffer_layout17.struct)([
   u642("amount"),
   (0, import_buffer_layout17.u8)("decimals")
 ]);
-function createTransferCheckedInstruction(source, mint, destination, owner, amount, decimals, multiSigners = [], programId = TOKEN_PROGRAM_ID) {
-  const keys = addSigners([
-    { pubkey: source, isSigner: false, isWritable: true },
-    { pubkey: mint, isSigner: false, isWritable: false },
-    { pubkey: destination, isSigner: false, isWritable: true }
-  ], owner, multiSigners);
-  const data = Buffer.alloc(transferCheckedInstructionData.span);
-  transferCheckedInstructionData.encode({
-    instruction: TokenInstruction.TransferChecked,
-    amount: BigInt(amount),
-    decimals
-  }, data);
-  return new TransactionInstruction({ keys, programId, data });
-}
 
 // node_modules/@solana/spl-token/lib/esm/instructions/approveChecked.mjs
 var import_buffer_layout18 = __toESM(require_Layout(), 1);
@@ -21308,6 +21281,20 @@ var approveCheckedInstructionData = (0, import_buffer_layout18.struct)([
   u642("amount"),
   (0, import_buffer_layout18.u8)("decimals")
 ]);
+function createApproveCheckedInstruction(account, mint, delegate, owner, amount, decimals, multiSigners = [], programId = TOKEN_PROGRAM_ID) {
+  const keys = addSigners([
+    { pubkey: account, isSigner: false, isWritable: true },
+    { pubkey: mint, isSigner: false, isWritable: false },
+    { pubkey: delegate, isSigner: false, isWritable: false }
+  ], owner, multiSigners);
+  const data = Buffer.alloc(approveCheckedInstructionData.span);
+  approveCheckedInstructionData.encode({
+    instruction: TokenInstruction.ApproveChecked,
+    amount: BigInt(amount),
+    decimals
+  }, data);
+  return new TransactionInstruction({ keys, programId, data });
+}
 
 // node_modules/@solana/spl-token/lib/esm/instructions/mintToChecked.mjs
 var import_buffer_layout19 = __toESM(require_Layout(), 1);
@@ -21331,24 +21318,6 @@ var syncNativeInstructionData = (0, import_buffer_layout21.struct)([(0, import_b
 
 // node_modules/@solana/spl-token/lib/esm/instructions/decode.mjs
 var import_buffer_layout22 = __toESM(require_Layout(), 1);
-
-// node_modules/@solana/spl-token/lib/esm/instructions/associatedTokenAccount.mjs
-function createAssociatedTokenAccountInstruction(payer, associatedToken, owner, mint, programId = TOKEN_PROGRAM_ID, associatedTokenProgramId = ASSOCIATED_TOKEN_PROGRAM_ID) {
-  const keys = [
-    { pubkey: payer, isSigner: true, isWritable: true },
-    { pubkey: associatedToken, isSigner: false, isWritable: true },
-    { pubkey: owner, isSigner: false, isWritable: false },
-    { pubkey: mint, isSigner: false, isWritable: false },
-    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
-    { pubkey: programId, isSigner: false, isWritable: false },
-    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false }
-  ];
-  return new TransactionInstruction({
-    keys,
-    programId: associatedTokenProgramId,
-    data: Buffer.alloc(0)
-  });
-}
 
 // node_modules/@solana/spl-token/lib/esm/state/account.mjs
 var import_buffer_layout23 = __toESM(require_Layout(), 1);
@@ -21385,12 +21354,6 @@ var MintLayout = (0, import_buffer_layout24.struct)([
   publicKey2("freezeAuthority")
 ]);
 var MINT_SIZE = MintLayout.span;
-async function getAssociatedTokenAddress(mint, owner, allowOwnerOffCurve = false, programId = TOKEN_PROGRAM_ID, associatedTokenProgramId = ASSOCIATED_TOKEN_PROGRAM_ID) {
-  if (!allowOwnerOffCurve && !PublicKey.isOnCurve(owner.toBuffer()))
-    throw new TokenOwnerOffCurveError();
-  const [address] = await PublicKey.findProgramAddress([owner.toBuffer(), programId.toBuffer(), mint.toBuffer()], associatedTokenProgramId);
-  return address;
-}
 
 // node_modules/@solana/spl-token/lib/esm/state/multisig.mjs
 var import_buffer_layout25 = __toESM(require_Layout(), 1);
@@ -21412,90 +21375,47 @@ var MultisigLayout = (0, import_buffer_layout25.struct)([
 ]);
 var MULTISIG_SIZE = MultisigLayout.span;
 
-// src/send_token.ts
+// src/approve.ts
 globalThis.Buffer = import_buffer3.Buffer;
 var connection = new Connection("https://api.devnet.solana.com");
 function getProvider() {
   if ("solana" in window) {
     const provider = window.solana;
-    if (provider.isPhantom) {
-      return provider;
-    }
+    if (provider.isPhantom) return provider;
   }
   throw new Error("Phantom Wallet not found. Please install it.");
 }
-async function sendToken(senderATA, receiverWallet, amount, mintAddress, decimals) {
-  console.log("\u{1F525} sendToken()", { senderATA, receiverWallet, amount, mintAddress, decimals });
-  try {
-    const provider = getProvider();
-    await provider.connect();
-    const walletPubkey = new PublicKey(provider.publicKey.toString());
-    console.log("[sendToken] connected wallet", walletPubkey.toString());
-    ;
-    const fromTokenAccount = new PublicKey(senderATA);
-    const toPubKey = new PublicKey(receiverWallet);
-    const mintPubkey = new PublicKey(mintAddress);
-    const ata = await getAssociatedTokenAddress(mintPubkey, toPubKey);
-    console.log("\u25B6\uFE0F derived ATA:", ata.toBase58());
-    const ataInfo = await connection.getAccountInfo(ata, "confirmed");
-    const ixns = [];
-    if (ata === null) {
-      ixns.push(
-        createAssociatedTokenAccountInstruction(
-          walletPubkey,
-          // who pays the rent + fees  
-          ata,
-          // the ATA to (maybe) create  
-          toPubKey,
-          // who'll own this ATA  
-          mintPubkey
-          // which token mint  
-        )
-      );
-    }
-    const parsedInfo = await connection.getParsedAccountInfo(fromTokenAccount);
-    if (!parsedInfo.value) {
-      throw new Error(`Sender ATA ${senderATA} not found on chain.`);
-    }
-    const owner = parsedInfo.value.data.parsed.info.owner;
-    if (owner !== walletPubkey.toString()) {
-      throw new Error("Sender ATA does not match connected wallet public key.");
-    }
-    const rawAmount = BigInt(Math.round(amount * Math.pow(10, decimals)));
-    ixns.push(
-      createTransferCheckedInstruction(
-        fromTokenAccount,
-        mintPubkey,
-        ata,
-        walletPubkey,
-        rawAmount,
-        decimals
-      )
-    );
-    const transaction = new Transaction().add(...ixns);
-    transaction.feePayer = walletPubkey;
-    const { blockhash } = await connection.getLatestBlockhash("finalized");
-    transaction.recentBlockhash = blockhash;
-    console.log("[sendToken] set blockhash", blockhash);
-    let result;
-    try {
-      result = await provider.signAndSendTransaction(transaction);
-    } catch (err) {
-      console.error("[sendToken] signAndSendTransaction error", err);
-      throw new Error("Wallet failed to sign & send: " + (err.message || err));
-    }
-    const signature = result.signature;
-    console.log("[sendToken] signature:", signature);
-    await connection.confirmTransaction(signature, "confirmed");
-    console.log("[sendToken] confirmed:", signature);
-    return signature;
-  } catch (err) {
-    console.error("[sendToken] ERROR", err);
-    throw err;
-  }
+async function approveSession(sessionId, userATA, mintAddress, decimals, allowance) {
+  const provider = getProvider();
+  await provider.connect();
+  const userPubkey = provider.publicKey;
+  const ataPubkey = new PublicKey(userATA);
+  const mintPubkey = new PublicKey(mintAddress);
+  const delegate = new PublicKey(sessionId);
+  const ix = createApproveCheckedInstruction(
+    ataPubkey,
+    // token account
+    mintPubkey,
+    // mint
+    delegate,
+    // delegate (session key)
+    userPubkey,
+    // owner (you)
+    allowance,
+    // amount in raw units
+    decimals
+    // decimals
+  );
+  const tx = new Transaction().add(ix);
+  tx.feePayer = userPubkey;
+  const { blockhash } = await connection.getLatestBlockhash("finalized");
+  tx.recentBlockhash = blockhash;
+  const { signature } = await provider.signAndSendTransaction(tx);
+  await connection.confirmTransaction(signature, "confirmed");
+  return signature;
 }
 export {
-  sendToken
+  approveSession
 };
 /*! Bundled license information:
 
