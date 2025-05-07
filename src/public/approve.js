@@ -15193,7 +15193,7 @@ var BlockProductionResponseStruct = jsonRpcResultAndContext(type({
   })
 }));
 function createRpcClient(url, httpHeaders, customFetch, fetchMiddleware, disableRetryOnRateLimit, httpAgent) {
-  const fetch = customFetch ? customFetch : fetchImpl;
+  const fetch2 = customFetch ? customFetch : fetchImpl;
   let agent;
   {
     if (httpAgent != null) {
@@ -15210,7 +15210,7 @@ function createRpcClient(url, httpHeaders, customFetch, fetchMiddleware, disable
           reject(error);
         }
       });
-      return await fetch(...modifiedFetchArgs);
+      return await fetch2(...modifiedFetchArgs);
     };
   }
   const clientBrowser = new import_browser.default(async (request, callback) => {
@@ -15230,7 +15230,7 @@ function createRpcClient(url, httpHeaders, customFetch, fetchMiddleware, disable
         if (fetchWithMiddleware) {
           res = await fetchWithMiddleware(url, options);
         } else {
-          res = await fetch(url, options);
+          res = await fetch2(url, options);
         }
         if (res.status !== 429) {
           break;
@@ -15793,7 +15793,7 @@ var Connection = class {
     })();
     let wsEndpoint;
     let httpHeaders;
-    let fetch;
+    let fetch2;
     let fetchMiddleware;
     let disableRetryOnRateLimit;
     let httpAgent;
@@ -15804,14 +15804,14 @@ var Connection = class {
       this._confirmTransactionInitialTimeout = _commitmentOrConfig.confirmTransactionInitialTimeout;
       wsEndpoint = _commitmentOrConfig.wsEndpoint;
       httpHeaders = _commitmentOrConfig.httpHeaders;
-      fetch = _commitmentOrConfig.fetch;
+      fetch2 = _commitmentOrConfig.fetch;
       fetchMiddleware = _commitmentOrConfig.fetchMiddleware;
       disableRetryOnRateLimit = _commitmentOrConfig.disableRetryOnRateLimit;
       httpAgent = _commitmentOrConfig.httpAgent;
     }
     this._rpcEndpoint = assertEndpointUrl(endpoint);
     this._rpcWsEndpoint = wsEndpoint || makeWebsocketUrl(endpoint);
-    this._rpcClient = createRpcClient(endpoint, httpHeaders, fetch, fetchMiddleware, disableRetryOnRateLimit, httpAgent);
+    this._rpcClient = createRpcClient(endpoint, httpHeaders, fetch2, fetchMiddleware, disableRetryOnRateLimit, httpAgent);
     this._rpcRequest = createRpcRequest(this._rpcClient);
     this._rpcBatchRequest = createRpcBatchRequest(this._rpcClient);
     this._rpcWebSocket = new RpcWebSocketClient(this._rpcWsEndpoint, {
@@ -21183,6 +21183,19 @@ var TOKEN_PROGRAM_ID = new PublicKey("TokenkegQfeZyiNwAJbNbGKPFXCWuBvf9Ss623VQ5D
 var ASSOCIATED_TOKEN_PROGRAM_ID = new PublicKey("ATokenGPvbdGVxr1b2hvZbsiqW5xWH25efTNsLJA8knL");
 var NATIVE_MINT = new PublicKey("So11111111111111111111111111111111111111112");
 
+// node_modules/@solana/spl-token/lib/esm/errors.mjs
+var TokenError = class extends Error {
+  constructor(message) {
+    super(message);
+  }
+};
+var TokenOwnerOffCurveError = class extends TokenError {
+  constructor() {
+    super(...arguments);
+    this.name = "TokenOwnerOffCurveError";
+  }
+};
+
 // node_modules/@solana/spl-token/lib/esm/instructions/initializeMint.mjs
 var initializeMintInstructionData = (0, import_buffer_layout5.struct)([
   (0, import_buffer_layout5.u8)("instruction"),
@@ -21319,6 +21332,24 @@ var syncNativeInstructionData = (0, import_buffer_layout21.struct)([(0, import_b
 // node_modules/@solana/spl-token/lib/esm/instructions/decode.mjs
 var import_buffer_layout22 = __toESM(require_Layout(), 1);
 
+// node_modules/@solana/spl-token/lib/esm/instructions/associatedTokenAccount.mjs
+function createAssociatedTokenAccountInstruction(payer, associatedToken, owner, mint, programId = TOKEN_PROGRAM_ID, associatedTokenProgramId = ASSOCIATED_TOKEN_PROGRAM_ID) {
+  const keys = [
+    { pubkey: payer, isSigner: true, isWritable: true },
+    { pubkey: associatedToken, isSigner: false, isWritable: true },
+    { pubkey: owner, isSigner: false, isWritable: false },
+    { pubkey: mint, isSigner: false, isWritable: false },
+    { pubkey: SystemProgram.programId, isSigner: false, isWritable: false },
+    { pubkey: programId, isSigner: false, isWritable: false },
+    { pubkey: SYSVAR_RENT_PUBKEY, isSigner: false, isWritable: false }
+  ];
+  return new TransactionInstruction({
+    keys,
+    programId: associatedTokenProgramId,
+    data: Buffer.alloc(0)
+  });
+}
+
 // node_modules/@solana/spl-token/lib/esm/state/account.mjs
 var import_buffer_layout23 = __toESM(require_Layout(), 1);
 var AccountState;
@@ -21354,6 +21385,12 @@ var MintLayout = (0, import_buffer_layout24.struct)([
   publicKey2("freezeAuthority")
 ]);
 var MINT_SIZE = MintLayout.span;
+async function getAssociatedTokenAddress(mint, owner, allowOwnerOffCurve = false, programId = TOKEN_PROGRAM_ID, associatedTokenProgramId = ASSOCIATED_TOKEN_PROGRAM_ID) {
+  if (!allowOwnerOffCurve && !PublicKey.isOnCurve(owner.toBuffer()))
+    throw new TokenOwnerOffCurveError();
+  const [address] = await PublicKey.findProgramAddress([owner.toBuffer(), programId.toBuffer(), mint.toBuffer()], associatedTokenProgramId);
+  return address;
+}
 
 // node_modules/@solana/spl-token/lib/esm/state/multisig.mjs
 var import_buffer_layout25 = __toESM(require_Layout(), 1);
@@ -21386,33 +21423,63 @@ function getProvider() {
   throw new Error("Phantom Wallet not found. Please install it.");
 }
 async function approveSession(sessionId, userATA, mintAddress, decimals, allowance) {
-  const provider = getProvider();
-  await provider.connect();
-  const userPubkey = provider.publicKey;
-  const ataPubkey = new PublicKey(userATA);
-  const mintPubkey = new PublicKey(mintAddress);
-  const delegate = new PublicKey(sessionId);
-  const ix = createApproveCheckedInstruction(
-    ataPubkey,
-    // token account
-    mintPubkey,
-    // mint
-    delegate,
-    // delegate (session key)
-    userPubkey,
-    // owner (you)
-    allowance,
-    // amount in raw units
-    decimals
-    // decimals
-  );
-  const tx = new Transaction().add(ix);
-  tx.feePayer = userPubkey;
-  const { blockhash } = await connection.getLatestBlockhash("finalized");
-  tx.recentBlockhash = blockhash;
-  const { signature } = await provider.signAndSendTransaction(tx);
-  await connection.confirmTransaction(signature, "confirmed");
-  return signature;
+  try {
+    const provider = getProvider();
+    await provider.connect();
+    const userPubkey = provider.publicKey;
+    const ataPubkey = new PublicKey(userATA);
+    const mintPubkey = new PublicKey(mintAddress);
+    const delegate = new PublicKey(sessionId);
+    const ixns = [];
+    const ataInfo = await connection.getAccountInfo(ataPubkey, "confirmed");
+    if (!ataInfo) {
+      const derivedAta = await getAssociatedTokenAddress(mintPubkey, userPubkey);
+      if (!derivedAta.equals(ataPubkey)) {
+        throw new Error("Supplied userATA does not match the associated token address for your wallet. Or your wallet might not the same on as you linked.");
+      }
+      ixns.push(
+        createAssociatedTokenAccountInstruction(
+          userPubkey,
+          // payer
+          ataPubkey,
+          // ATA to create
+          userPubkey,
+          // owner of ATA
+          mintPubkey
+          // mint
+        )
+      );
+    }
+    const ix = createApproveCheckedInstruction(
+      ataPubkey,
+      // token account
+      mintPubkey,
+      // mint
+      delegate,
+      // delegate (session key)
+      userPubkey,
+      // owner (you)
+      allowance,
+      // amount in raw units
+      decimals
+      // decimals
+    );
+    ixns.push(ix);
+    const tx = new Transaction().add(...ixns);
+    tx.feePayer = userPubkey;
+    const { blockhash } = await connection.getLatestBlockhash("finalized");
+    tx.recentBlockhash = blockhash;
+    const { signature } = await provider.signAndSendTransaction(tx);
+    await connection.confirmTransaction(signature, "confirmed");
+    return signature;
+  } catch (err) {
+    await fetch("/session/delete", {
+      method: "POST",
+      headers: { "Content-Type": "application/json" },
+      body: JSON.stringify({ sessionId })
+    });
+    throw err;
+  }
 }
 export {
   approveSession

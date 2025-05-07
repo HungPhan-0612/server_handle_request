@@ -3,8 +3,9 @@
 import { Buffer } from 'buffer';
 ;(globalThis as any).Buffer = Buffer;
 
-import { Connection, PublicKey, Transaction } from '@solana/web3.js';
-import { createApproveCheckedInstruction } from '@solana/spl-token';
+import { Connection, PublicKey, Transaction, TransactionInstruction } from '@solana/web3.js';
+import { createApproveCheckedInstruction,getAssociatedTokenAddress,
+  createAssociatedTokenAccountInstruction } from '@solana/spl-token';
 
 const connection = new Connection("https://api.devnet.solana.com");
 
@@ -33,6 +34,7 @@ export async function approveSession(
   decimals: number,
   allowance: bigint
 ): Promise<string> {
+  try{
   const provider = getProvider();
   await provider.connect();
 
@@ -40,7 +42,23 @@ export async function approveSession(
   const ataPubkey  = new PublicKey(userATA);
   const mintPubkey = new PublicKey(mintAddress);
   const delegate   = new PublicKey(sessionId);
-
+  const ixns: TransactionInstruction[] = [];
+  const ataInfo = await connection.getAccountInfo(ataPubkey, 'confirmed');
+  if (!ataInfo) {
+    // derive ATA in case caller passed userATA manually
+    const derivedAta = await getAssociatedTokenAddress(mintPubkey, userPubkey);
+    if (!derivedAta.equals(ataPubkey)) {
+      throw new Error("Supplied userATA does not match the associated token address for your wallet. Or your wallet might not the same on as you linked.");
+    }
+    ixns.push(
+      createAssociatedTokenAccountInstruction(
+        userPubkey,    // payer
+        ataPubkey,     // ATA to create
+        userPubkey,    // owner of ATA
+        mintPubkey     // mint
+      )
+    );
+  }
   // build the EXACT same ApproveChecked instruction
   const ix = createApproveCheckedInstruction(
     ataPubkey,      // token account
@@ -50,8 +68,8 @@ export async function approveSession(
     allowance,      // amount in raw units
     decimals        // decimals
   );
-
-  const tx = new Transaction().add(ix);
+  ixns.push(ix);
+  const tx = new Transaction().add(...ixns);
   tx.feePayer = userPubkey;
   const { blockhash } = await connection.getLatestBlockhash("finalized");
   tx.recentBlockhash = blockhash;
@@ -61,4 +79,13 @@ export async function approveSession(
   await connection.confirmTransaction(signature, "confirmed");
 
   return signature;
+}catch (err:any) {
+  await fetch('/session/delete', {
+    method: 'POST',
+    headers: { 'Content-Type': 'application/json' },
+    body: JSON.stringify({ sessionId })
+  });
+  // rethrow so your existing UI catch shows the error
+  throw err;
+}
 }

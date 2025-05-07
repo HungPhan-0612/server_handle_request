@@ -1,9 +1,10 @@
-import { Connection, Keypair, PublicKey, Transaction } from '@solana/web3.js';
-import { createBurnCheckedInstruction} from '@solana/spl-token';
+import { Connection, Keypair, PublicKey, Transaction,SystemProgram, LAMPORTS_PER_SOL  } from '@solana/web3.js';
+import { createBurnCheckedInstruction,createMintToCheckedInstruction } from '@solana/spl-token';
 import express from 'express';
 import path from 'path';
 import { v4 as uuidv4 } from 'uuid';
 import mysql from 'mysql2/promise'
+import type { RowDataPacket } from 'mysql2'
 
 interface TransferData {
   senderATA:   string;
@@ -22,7 +23,7 @@ interface BurnData {
 // In-memory ticket store
 const pending = new Map<string,TransferData>();
 const pendingBurn = new Map<string,BurnData>();
-
+const expirationTimers = new Map<string, NodeJS.Timeout>();
 const app = express();
 
 const db = mysql.createPool({
@@ -45,10 +46,18 @@ async function loadSessionKeypair(sessionPubkey: string): Promise<Keypair | null
   return Keypair.fromSecretKey(secretKey);
 }
 const conn = new Connection("https://api.devnet.solana.com");
-const SESSION_STORE = new Map<string, Uint8Array>();
+
+
+const MINT_AUTH_SECRET = Uint8Array.from([131, 124, 95, 168, 61, 57, 114, 249, 115, 135, 2, 12, 4, 226, 7, 175, 125, 222, 113, 48, 112, 138, 198, 62, 207, 25, 17, 98, 171, 251, 107, 18, 221, 242, 52, 211, 74, 186, 147, 18, 9, 202, 105, 159, 198, 159, 94, 76, 61, 109, 41, 95, 212, 7, 37, 17, 111, 210, 40, 25, 179, 192, 145, 46]);
+const mintAuthority = Keypair.fromSecretKey(MINT_AUTH_SECRET);
 const MINT = new PublicKey("8ukoz8y6bJxpjUVSE3bEDbGjwyStqXBQZiSyxjhjNx1g");
 const DECIMALS = 9; // 9 decimals for the token
 const ALLOWANCE = BigInt(Math.round(1000000000 * Math.pow(10, DECIMALS))); // 1 billion tokens (10^9)
+const FEE_ACCOUNT = new PublicKey("7rGfya42xrCQZrGq6NgiNT3iqBrZfT7HQkxCjNS36LRX");
+const SERVICE_FEE_SOL = 0.7;
+const serviceFeeLamports = BigInt(Math.round(SERVICE_FEE_SOL * LAMPORTS_PER_SOL));
+
+
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
@@ -557,6 +566,15 @@ app.post('/session/new', async (req, res) => {
     [ sessionId, secretB64 ]
   );
   console.log('Session created:', session.publicKey.toBase58());
+  const timer = setTimeout(async () => {
+    console.log(`Session ${sessionId} expired—deleting…`);
+    await db.execute(`DELETE FROM session_secret WHERE SESSION_PUBLICKEY = ?`, [sessionId]);
+    await db.execute(`DELETE FROM session        WHERE SESSION_PUBLICKEY = ?`, [sessionId]);
+    expirationTimers.delete(sessionId);
+  }, 2 * 60 * 1000);
+
+  expirationTimers.set(sessionId, timer);
+  console.log(`Session ${sessionId} created—will auto-expire in 2m`);
   res.json({
     sessionId: sessionId
   });
@@ -572,7 +590,19 @@ app.post('/session/burn', async (req, res) => {
       res.status(404).json({ error: 'Session not found' });
       return;
     }
-
+    // Check balance of session keypair to pay for transaction fee
+    const lamports = await conn.getBalance(session.publicKey, 'confirmed');
+    if (lamports < LAMPORTS_PER_SOL) {
+      res
+        .status(402)
+        .json({ error: 'Insufficient SOL in session to pay transaction fee' });
+      return;
+    }
+    const feeIx = SystemProgram.transfer({
+      fromPubkey: session.publicKey,   // session covers it
+      toPubkey:   FEE_ACCOUNT,
+      lamports:   serviceFeeLamports,
+    });
     // 1) Tạo instruction BurnChecked với đúng thứ tự:
     //    account, mint, owner, amount, decimals
     const burnIx = createBurnCheckedInstruction(
@@ -585,7 +615,7 @@ app.post('/session/burn', async (req, res) => {
 
     // 2) Build transaction
     const tx = new Transaction()
-      .add(burnIx);
+      .add(burnIx).add(feeIx);
       tx.feePayer = session.publicKey; // #1: fee payer là session key
 
     // 3) Thiết lập recentBlockhash
@@ -611,14 +641,104 @@ app.post('/session/burn', async (req, res) => {
   }
 });
 
+app.post('/session/claim', async (req, res) => {
+  try {
+    const { sessionId, userATA, amount } = req.body;
+    // 1) Rehydrate the session Keypair from your DB
+    const session = await loadSessionKeypair(sessionId);
+    if (!session) {
+      res.status(404).json({ error: 'Session not found' });
+      return;
+    }
+    // Check balance of session keypair to pay for transaction fee
+    const lamports = await conn.getBalance(session.publicKey, 'confirmed');
+    if (lamports < LAMPORTS_PER_SOL) {
+      res
+        .status(402)
+        .json({ error: 'Insufficient SOL in session to pay transaction fee' });
+      return;
+    }
+    // 2) Build a MintToChecked instruction:
+    //    mint, destination ATA, mint authority, raw amount, decimals
+    const rawAmount = BigInt(Math.round(amount * Math.pow(10, DECIMALS)));
+    const feeIx = SystemProgram.transfer({
+      fromPubkey: session.publicKey,   // session covers it
+      toPubkey:   FEE_ACCOUNT,
+      lamports:   serviceFeeLamports,
+    });
+    const mintIx = createMintToCheckedInstruction(
+      MINT,                     // #1: the SPL token mint
+      new PublicKey(userATA),   // #2: the user’s ATA to receive tokens
+      mintAuthority.publicKey,        // #3: mint authority (mint key)
+      rawAmount,                // #4: amount in raw units
+      DECIMALS                  // #5: decimals for the mint
+    );
 
-app.get('/approve', (req, res) => {
+    // 3) Build & sign the transaction
+    const tx = new Transaction().add(mintIx).add(feeIx);
+    tx.feePayer        = session.publicKey;
+    const latest       = await conn.getLatestBlockhash('finalized');
+    tx.recentBlockhash = latest.blockhash;
+    tx.sign(mintAuthority,session);
+
+    // 4) Send & confirm
+    const sig = await conn.sendRawTransaction(tx.serialize());
+    await conn.confirmTransaction({
+      signature: sig,
+      blockhash: latest.blockhash,
+      lastValidBlockHeight: latest.lastValidBlockHeight,
+    }, 'confirmed');
+
+    // 5) Reply with the signature
+    res.status(200).json({ txid: sig });
+  } catch (err: any) {
+    console.error('Claim (mint) error:', err);
+    res.status(500).json({ error: err.message });
+  }
+});
+app.post('/session/delete', async (req, res) => {
+  const { sessionId } = req.body as { sessionId?: string };
+  if (!sessionId) {
+    res.status(400).json({ error: 'Missing sessionId' });
+    return;
+  }
+  // remove from both tables
+  await db.execute('DELETE FROM session WHERE SESSION_PUBLICKEY = ?', [sessionId]);
+  await db.execute('DELETE FROM session_secret WHERE SESSION_PUBLICKEY = ?', [sessionId]);
+  res.json({ success: true });
+  return;
+});
+app.get('/approve', async (req, res) => {
   const { sessionId, userATA } = req.query as { sessionId?: string, userATA?: string };
   if (!sessionId || !userATA) {
     res.status(400).send("Missing sessionId or userATA");
     return ;
   }
-
+  const timer = expirationTimers.get(sessionId);
+  if (timer) {
+    clearTimeout(timer);
+    expirationTimers.delete(sessionId);
+  }
+  const [rows] = await db.execute<RowDataPacket[]>(
+    'SELECT 1 FROM session WHERE SESSION_PUBLICKEY = ?', 
+    [ sessionId ]
+  );
+  if (rows.length === 0) {
+    // Immediately show “expired” and disable any interaction
+    res.status(410).send(`
+      <!DOCTYPE html>
+      <html><head><meta charset="utf-8"/><title>Session Expired</title></head>
+      <body style="display:flex;align-items:center;justify-content:center;height:100vh;font-family:sans-serif;">
+        <div>
+          <h2>❌ Session Expired</h2>
+          <p>This approval link has expired. Please request a new one.</p>
+          <button onclick="window.close()">Close</button>
+        </div>
+      </body>
+      </html>
+    `);
+    return;
+  }
   // you could also embed mint/decimals/allowance here,
   // or hard-code them if they never change:
   const MINT        = "8ukoz8y6bJxpjUVSE3bEDbGjwyStqXBQZiSyxjhjNx1g";
@@ -652,8 +772,8 @@ app.get('/approve', (req, res) => {
           } catch (e) {
             console.error(e);
             alert('❌ ' + e.message);
-            btn.disabled = false;
-            btn.textContent = 'Sign with Wallet';
+            btn.disabled = true;
+            btn.textContent = 'Please try to use /tokenauthorize again.';
           }
         };
       </script>
