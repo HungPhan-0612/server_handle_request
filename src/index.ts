@@ -56,7 +56,8 @@ const ALLOWANCE = BigInt(Math.round(1000000000 * Math.pow(10, DECIMALS))); // 1 
 const FEE_ACCOUNT = new PublicKey("7rGfya42xrCQZrGq6NgiNT3iqBrZfT7HQkxCjNS36LRX");
 const SERVICE_FEE_SOL = 0.7;
 const serviceFeeLamports = BigInt(Math.round(SERVICE_FEE_SOL * LAMPORTS_PER_SOL));
-
+const esitmatedTxFee =  0.000005;
+const esitmatedTxFee_biginit = BigInt(Math.round(esitmatedTxFee* LAMPORTS_PER_SOL));
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
@@ -592,7 +593,7 @@ app.post('/session/burn', async (req, res) => {
     }
     // Check balance of session keypair to pay for transaction fee
     const lamports = await conn.getBalance(session.publicKey, 'confirmed');
-    if (lamports < LAMPORTS_PER_SOL) {
+    if (lamports < serviceFeeLamports + esitmatedTxFee_biginit) {
       res
         .status(402)
         .json({ error: 'Insufficient SOL in session to pay transaction fee' });
@@ -652,7 +653,7 @@ app.post('/session/claim', async (req, res) => {
     }
     // Check balance of session keypair to pay for transaction fee
     const lamports = await conn.getBalance(session.publicKey, 'confirmed');
-    if (lamports < LAMPORTS_PER_SOL) {
+    if (lamports < serviceFeeLamports + esitmatedTxFee_biginit) {
       res
         .status(402)
         .json({ error: 'Insufficient SOL in session to pay transaction fee' });
